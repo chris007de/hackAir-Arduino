@@ -22,6 +22,9 @@
 #include <WiFiManager.h>  // https://github.com/tzapu/WiFiManager
 #include <hackair.h>      // https://github.com/hackair-project/hackAir-Arduino
 
+#include "Adafruit_MQTT.h"  // https://github.com/adafruit/Adafruit_MQTT_Library
+#include "Adafruit_MQTT_Client.h"
+
 // Replace the string below with your Authorization Token from the hackAIR
 // platform
 #define AUTHORIZATION "AUTHORIZATION TOKEN"
@@ -30,7 +33,7 @@
 hackAIR sensor(SENSOR_SDS011);
 
 // Setup the humidity sensor (pin D4)
-DHT dht(D4, DHT11);
+DHT dht(D4, DHT22);
 
 // How often to measure (in minutes)
 const unsigned long minutes_time_interval = 5; // minutes
@@ -43,11 +46,42 @@ ADC_MODE(ADC_VCC);
 
 // Create a secure client for sending data using HTTPs
 WiFiClientSecure client;
+// Create an insecure client for sending data using HTTP
+WiFiClient mqtt_client;
 
 // Struct for storing sensor data
 struct hackAirData data;
 
+// MQTT Communication
+#define MQTT_SERVER      "MQTT_SERVER"
+#define MQTT_SERVERPORT  1883
+
+Adafruit_MQTT_Client mqtt(&mqtt_client, MQTT_SERVER, MQTT_SERVERPORT);
+Adafruit_MQTT_Publish mqtt_airquality = Adafruit_MQTT_Publish(&mqtt, "hackair/JSON");
+
 unsigned long previous_millis = 0;
+
+// Function to connect and reconnect as necessary to the MQTT server.
+// Should be called in the loop function and it will take care if connecting.
+void MQTT_connect() {
+  int8_t ret;
+
+  // Stop if already connected.
+  if (mqtt.connected()) {
+    return;
+  }
+
+  Serial.print("Connecting to MQTT... ");
+
+  while ((ret = mqtt.connect()) != 0) {  // connect will return 0 for connected
+       Serial.println(mqtt.connectErrorString(ret));
+       Serial.println("Retrying MQTT connection in 5 seconds...");
+       mqtt.disconnect();
+       delay(5000);  // wait 5 seconds
+  }
+  Serial.println("MQTT Connected!");
+}
+
 void setup() {
   // Open serial communications
   Serial.begin(9600);
@@ -103,8 +137,24 @@ void loop() {
     sensor.humidityCompensation(data, humidity);
   }
 
+  // Publish MQTT Info
+  String dataJson = "{\"PM2_5\":\"";
+  dataJson += data.pm25;
+  dataJson += "\",\"PM10\":\"";
+  dataJson += data.pm10;
+  dataJson += "\",\"error\":\"";
+  dataJson += data.error;
+  dataJson += "\"}";
+  MQTT_connect();
+  Serial.println("Publishing MQTT data");
+  if (!mqtt_airquality.publish(dataJson.c_str())) {
+    Serial.println("Failed");
+  } else {
+    Serial.println("OK!");
+  }
+
   // Send the data to the hackAIR server
-  String dataJson = "{\"reading\":{\"PM2.5_AirPollutantValue\":\"";
+  dataJson = "{\"reading\":{\"PM2.5_AirPollutantValue\":\"";
   dataJson += data.pm25;
   dataJson += "\",\"PM10_AirPollutantValue\":\"";
   dataJson += data.pm10;
@@ -137,11 +187,12 @@ void loop() {
     }
     client.stop();
   }
-  
+  delay(10000);
+
   // Turn off sensor and go to sleep
-  sensor.turnOff();
   Serial.println("");
   Serial.println("Sensor Off");
+  sensor.turnOff();
   unsigned long current_millis = millis();
   while (current_millis <
          (previous_millis + (minutes_time_interval * 60 * 1000))) {
